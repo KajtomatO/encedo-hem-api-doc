@@ -1,12 +1,14 @@
 # /api/auth/init
 
-Device initialization (personalization). Two-step process: get challenge, then submit initialization data.
+Device initialisation (one-shot personalisation). Two-step process: fetch a challenge, then submit a signed init JWT containing the `cfg` block that commits the initial configuration to flash.
+
+An initialised device returns `406` from both verbs — reinit requires a full wipeout first (`POST /api/system/config {"wipeout":true}` or the DIAG wipe).
 
 ---
 
 ## GET /api/auth/init
 
-Get initialization challenge data from an unpersonalized device.
+Fetch an init challenge.
 
 ### Request
 
@@ -14,7 +16,12 @@ Get initialization challenge data from an unpersonalized device.
 GET /api/auth/init
 ```
 
-**Authentication:** Not required
+**Authentication:** Not required.
+
+**Preconditions (checked in order):**
+1. RTC must be set — otherwise `403`. Unlike `/api/auth/token`, init **always** requires a set RTC (regardless of [`trusted_ts`](../concepts/device-options.md#trusted_ts--trust-the-on-device-rtc)).
+2. Device must **not** already be initialised — otherwise `406`.
+3. `fls_state` must be `0` — otherwise `409`.
 
 ### Response
 
@@ -22,35 +29,36 @@ GET /api/auth/init
 
 ```json
 {
-  "exp": 1647936471,
-  "spk": "base64_server_public_key",
-  "jti": "base64_jwt_id",
-  "genuine": "base64_attestation_data",
+  "exp": 1647871504,
+  "spk": "base64_session_public_key",
+  "jti": "base64_jwt_id_nonce",
+  "genuine": "base64_atecc608_attestation_token",
   "eid": "base64_encedo_id"
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `exp` | Number | Expiration timestamp for the challenge |
-| `spk` | String | Server public key (base64) -- used for ECDH |
-| `jti` | String | JWT ID / nonce (base64) |
-| `genuine` | String | Attestation data (base64) |
-| `eid` | String | EncedoID -- device public key (base64), used as Argon2 salt |
+| `exp` | Number | Challenge expiration — 60 seconds after issuance. |
+| `spk` | String | Session public key (base64, X25519) — the device's ephemeral ECDH key. |
+| `jti` | String | Base64 36-byte time-based nonce. |
+| `genuine` | String | ATECC608 attestation token (PPA) or `Session.epa_genuine` (EPA). Lets the caller verify they are talking to a real Encedo device before trusting it with the master key. |
+| `eid` | String | EncedoID — device's long-lived Curve25519 public key (base64). Used as salt for the caller's password KDF. |
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 403 | Clock RTC not set |
-| 406 | Operation failed |
-| 409 | Incorrect internal state (device already initialized) |
+| 403 | RTC not set. |
+| 406 | Device already initialised. |
+| 409 | `fls_state != 0` (self-test failure). |
+| 500 | Allocation failure. |
 
 ---
 
 ## POST /api/auth/init
 
-Submit the initialization JWT with master key, user key, and device configuration.
+Commit the initial configuration.
 
 ### Request
 
@@ -60,47 +68,76 @@ Content-Type: application/json
 ```
 
 ```json
-{
-  "init": "signed_jwt_string"
-}
+{ "init": "<signed_jwt>" }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `init` | String | Yes | JWT signed with ECDH shared secret containing the init config |
+**Authentication:** Not required. Security comes from the ECDH signature on the JWT.
 
-### JWT Payload Structure
+**Preconditions (checked in order):**
+1. RTC set; otherwise `403`.
+2. Not already initialised; otherwise `406`.
+3. `fls_state == 0`; otherwise `409`.
 
-The `init` JWT contains:
+### Init JWT
 
+Signed HS256 with the ECDH shared secret between the caller's private key and the device's `spk` from the GET response — same construction as `/api/auth/token`.
+
+**Header:**
+```json
+{ "ecdh": "x25519" }
+```
+
+**Payload:**
 ```json
 {
-  "jti": "challenge_jti",
-  "aud": "server_public_key",
-  "exp": "challenge_exp",
-  "iat": "current_timestamp",
-  "iss": "master_public_key",
+  "jti": "<challenge_jti>",
+  "aud": "<spk>",
+  "exp": <challenge_exp>,
+  "iat": <current_timestamp>,
+  "iss": "<caller_public_key_base64>",
   "cfg": {
-    "masterkey": "base64_master_public_key",
-    "userkey": "base64_user_public_key",
-    "user": "username",
-    "email": "user@example.com",
-    "hostname": "my.ence.do",
-    "ip": "192.168.1.1",
-    "storage_mode": 1,
-    "storage_disk0size": 1024,
-    "dnsd": true,
-    "trusted_ts": true,
+    "masterkey": "base64_curve25519_public",
+    "userkey":   "base64_curve25519_public",
+    "user":      "Alice",
+    "email":     "alice@example.com",
+    "hostname":  "my.ence.do",
+    "ip":        "192.168.1.10/24",
+    "storage_mode":       83,
+    "storage_disk0size":  8388608,
+    "dnsd":            true,
+    "trusted_ts":      true,
     "trusted_backend": true,
     "allow_keysearch": true,
-    "origin": "*",
-    "gen_csr": true
+    "origin":          "*",
+    "gen_csr":         true,
+    "ctx":             0
   }
 }
 ```
 
-JWT header: `{ "ecdh": "x25519" }`
-JWT signing: HMAC-SHA256 with ECDH shared secret derived from `masterSecretKey` x `spk`.
+### `cfg` fields
+
+The device tracks each recognised field as a bit in a completeness mask and refuses the whole request (`400`) unless **all 14 bits** are set.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `user` | String | Yes | Initial `MainCfg.UserIdentity`. |
+| `masterkey` | String | Yes | Curve25519 public key of the master-password persona. Master-key tokens can reconfigure/wipeout the device. |
+| `userkey` | String | Yes | Curve25519 public key of the user-password persona. Can be rotated later via `POST /api/system/config`. |
+| `hostname` | String | Yes | Device hostname. |
+| `ip` | String | Yes (PPA) / auto (EPA) | `A.B.C.D/prefix`. EPA has no network stack configurable here — the bit is auto-set. |
+| `origin` | String | Yes | CORS origin ([`origin`](../concepts/device-options.md#origin--cors-origin)). |
+| `storage_mode` | Number | Yes (PPA) / auto (EPA) | [`storage_mode`](../concepts/device-options.md#storage_mode--storage-layout--crypto-mode). |
+| `storage_disk0size` | Number | Yes (PPA) / auto (EPA) | [`storage_disk0size`](../concepts/device-options.md#storage_disk0size--plaintext-partition-size). |
+| `trusted_ts` | Boolean | Yes | [`trusted_ts`](../concepts/device-options.md#trusted_ts--trust-the-on-device-rtc). |
+| `trusted_backend` | Boolean | Yes | [`trusted_backend`](../concepts/device-options.md#trusted_backend--trust-the-cloud-notification-broker). |
+| `allow_keysearch` | Boolean | Yes | [`allow_keysearch`](../concepts/device-options.md#allow_keysearch--enable-unauthenticated-key-search). |
+| `dnsd` | Boolean | Yes (PPA) / auto (EPA) | [`dnsd`](../concepts/device-options.md#dnsd--local-dns-daemon). |
+| `email` | String | Yes | `MainCfg.UserEmail`. |
+| `gen_csr` | Boolean | Yes | Whether to generate a device TLS CSR during init (see below). |
+| `ctx` | Number | No | Opaque context id. Defaults to `0` if omitted. Does **not** participate in the completeness mask. |
+
+Validation rules per field are the same as in `POST /api/system/config` — labels go through `isvalid_label`, numbers are range-clamped where applicable, `storage_disk0size` is clamped to `sd_card_sector_count - 128KB`.
 
 ### Response
 
@@ -108,67 +145,66 @@ JWT signing: HMAC-SHA256 with ECDH shared secret derived from `masterSecretKey` 
 
 ```json
 {
-  "instanceid": "e7aafede-76b1-c7c8-784b-c963967fe307",
-  "token": "jwt_access_token",
-  "genuine": "attestation_data"
+  "reboot_required": true,
+  "instanceid": "uuid-hex",
+  "token": "<bearer_jwt>",
+  "csr": "PEM_CSR",
+  "genuine": "attestation_token"
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `instanceid` | String | Newly created instance UUID |
-| `token` | String | JWT access token for post-init operations |
-| `genuine` | String | Attestation data |
+| Field | When emitted | Description |
+|-------|--------------|-------------|
+| `reboot_required` | When hostname, IP, storage_mode (disk1 crypto), or disk0 size changed from defaults | Tells the caller to reboot. |
+| `instanceid` | Always | New device UUID (HKDF over DeviceKey). |
+| `token` | Always | Bearer JWT with `sub="U"` and scope `system:config`. Use this to finalise setup (import TLS cert, rotate userkey, etc.). |
+| `csr` | Only when `gen_csr: true` succeeded | PEM-encoded TLS CSR generated from a new on-device P-256 key; the key is stored in the repo with descriptor `DNS:<hostname>`. |
+| `genuine` | Always | Fresh ATECC608 attestation token (PPA) or `Session.epa_genuine` (EPA). |
+
+Side effects on success:
+- Committed config is flashed (`flash_write_user_signature`).
+- Key repository is initialised with `StorageSecrets`.
+- Audit log entry `LOG_TYPE_DEVICE_INITED` with `sub="M"`.
+- On PPA, `StartTaskFormatDisks(0)` is kicked off after the response — the first-boot format runs in the background.
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 400 | Incorrect argument(s) |
-| 401 | Initialization JWT validation failed |
-| 403 | Clock RTC not set |
-| 406 | Operation failed |
-| 409 | Incorrect internal state |
+| 400 | Malformed JSON, missing `init`, missing `cfg` object, or any of the 14 mandatory `cfg` fields missing/invalid. |
+| 401 | JWT decode/validate failed, or `jti` invalid. |
+| 403 | RTC not set. |
+| 406 | Device already initialised, or flash write failed. |
+| 409 | `fls_state != 0`. |
+| 500 | Allocation failure. |
+
+## Notes
+
+- The firmware is **KDF-agnostic**: any caller whose public key matches `masterkey` or `userkey` at login time is accepted. The reference implementations (Manager, test suite) use Argon2 and PBKDF2 respectively; see [auth/token.md](token.md).
+- There is no built-in way to change `masterkey` after init. Rotating it requires a full wipeout + re-init.
 
 ## Encedo Manager Usage
 
 ```javascript
-// build.js:533-638
-// Step 1: Get challenge
-app.api('api/auth/init').then(function(encedo_authinit) {
-    // Step 2: Generate keys
-    // - Argon2(password, eid) -> userSecret -> NaCl keypair
-    // - BIP39 mnemonic -> masterSecret -> NaCl keypair
-    // - ECDH: masterSecretKey x spk -> sharedSecret
-    // Step 3: Sign JWT and POST
-    var jwt = self.jwt_generate_hs256(header, dataFinal, sharedSecret);
-    xhr.open('POST', self.encedo_url + '/api/auth/init');
-    xhr.send(JSON.stringify({ init: jwt }));
+// build.js:533+
+app.api('api/auth/init').then(function(challenge) {
+    // 1. Argon2(userPassword, salt=eid) → userkey keypair
+    // 2. BIP39 mnemonic → masterSecret → masterkey keypair
+    // 3. ECDH(masterSecretKey, spk) → sharedSecret
+    // 4. jwt_generate_hs256({ecdh:"x25519"}, { jti, aud, exp, iat, iss, cfg }, sharedSecret)
+    return app.api('api/auth/init', 'POST', { init: jwt });
 });
 ```
 
-**Source references:** [encedo.js:488-638](https://github.com/encedo/encedo-manager/blob/main/assets/encedo.js#L488), [build.js:533-758](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L533)
+Manager references: [encedo.js:488](https://github.com/encedo/encedo-manager/blob/main/assets/encedo.js#L488), [build.js:533](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L533)
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_2.php:82
-$ret_stat = http_transaction("https", "GET", $cfg_domain, "/api/auth/init", $ret_val);
+// test_2.php:82 (GET)
+http_transaction("https", "GET", $cfg_domain, "/api/auth/init", $ret_val);
+// test_2.php:128 (POST)
+http_transaction("https", "POST", $cfg_domain, "/api/auth/init", $ret_val, $opt);
 ```
 
-```php
-// hem-api-tester/test_2.php:128
-$ret_stat = http_transaction("https", "POST", $cfg_domain, "/api/auth/init", $ret_val, $opt);
-```
-
-**Source references:** [test_2.php:82](https://github.com/encedo/hem-api-tester/blob/main/test_2.php#L82), [test_2.php:128](https://github.com/encedo/hem-api-tester/blob/main/test_2.php#L128), [test_2.php:245](https://github.com/encedo/hem-api-tester/blob/main/test_2.php#L245)
-
-## Official Docs vs Encedo Manager
-
-**Status:** Documented -- matches [Encedo Manager](https://github.com/encedo/encedo-manager).
-
-> **NOTE:** The official docs describe `init` as an opaque "initialization structure" string. [Encedo Manager](https://github.com/encedo/encedo-manager) reveals it is a JWT signed with `HS256` using an X25519 ECDH-derived shared secret, containing a `cfg` object with all personalization parameters.
-
-> **CRITICAL DISCREPANCY (KDF):** The Manager uses **Argon2** for password-to-key derivation during init; the [HEM API test suite](https://github.com/encedo/hem-api-tester) uses **PBKDF2-SHA256** (600,000 iterations). See [token.md](token.md) for full details.
-
-> **JWT header discrepancy:** The Manager sets `{ "ecdh": "x25519" }`. The test suite sets `{ "alg": "HS256", "typ": "JWT", "ecdh": "x25519" }`. Both are accepted by the device.
+Test references: [test_2.php:82](https://github.com/encedo/hem-api-tester/blob/main/test_2.php#L82), [test_2.php:128](https://github.com/encedo/hem-api-tester/blob/main/test_2.php#L128), [test_2.php:245](https://github.com/encedo/hem-api-tester/blob/main/test_2.php#L245)

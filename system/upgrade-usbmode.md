@@ -1,46 +1,48 @@
 # GET /api/system/upgrade/usbmode
 
-Enable USB serial (CDC ACM) mode for firmware upgrade via direct USB connection. After calling this endpoint, the device exposes a serial port (e.g., `/dev/ttyACM0` on Linux) and accepts firmware in Intel HEX format.
+Reboot the device into USB serial (CDC ACM) upgrade mode. In this mode the device exposes a serial port (`/dev/ttyACM0` on Linux) to the bootloader, which accepts an Intel HEX firmware stream. Available on both PPA and EPA builds.
 
 ## Request
 
 ```
 GET /api/system/upgrade/usbmode
-Authorization: Bearer <JWT_TOKEN>
+Authorization: Bearer <token>
 ```
 
-**Scope:** `system:upgrade`
+**Authentication:**
+- On an **initialised** device: Bearer with scope `system:upgrade` or `system:config`.
+- On a **fresh/uninitialised** device: no auth.
+- Another install in progress → `409`.
 
 ## Response
 
-**Status:** `200 OK`
+**Status:** `200 OK` with `Connection: close`, followed after a 2-second delay by `restart_bootloader(BOOT_GOTO_USB)`. The device then reboots into the bootloader's USB serial mode; the HTTP listener is gone until the next power-cycle or bootloader exit.
 
-After a successful response, the device enters USB serial mode. Firmware can be sent over the serial port (e.g., using `sx` / XMODEM or a terminal tool on Windows).
+No JSON body.
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 401 | Missing or invalid JWT token |
-| 403 | Incorrect access scope |
-| 406 | Operation failed |
-| 409 | Incorrect internal state |
+| 401 | Device initialised and no Bearer. |
+| 403 | Scope not `system:upgrade` or `system:config`. |
+| 406 | Generic operation failure. Audit-logged `LOG_TYPE_UPGRADE` (ERROR). |
+| 409 | Another install in progress. |
+
+## Notes
+
+- The bootloader running after this call is a separate component; documenting its serial protocol is out of scope for this API reference.
+- This endpoint is the only path that triggers `BOOT_GOTO_USB` — the web upload flow uses `BOOT_GOTO_UPGRADE` instead.
 
 ## Encedo Manager Usage
 
-**Not present in the Manager UI.** This endpoint is not registered in `_endpoints` and not called in [Encedo Manager](https://github.com/encedo/encedo-manager).
-
-Discovered via the [HEM API test suite](https://github.com/encedo/hem-api-tester) (`test_7.php:90`, `upgrade2diag.php:76`), where it is used before sending firmware over the serial port.
+Not exercised by the current Manager build.
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_7.php:90
-$ret_stat = http_transaction("https", "GET", $cfg_domain, "/api/system/upgrade/usbmode", $ret_val, $post_dummy, $token);
+// test_7.php:90
+http_transaction("https", "GET", $cfg_domain, "/api/system/upgrade/usbmode", $ret_val, $post_dummy, $token);
 ```
 
-**Source references:** [test_7.php:90](https://github.com/encedo/hem-api-tester/blob/main/test_7.php#L90), [upgrade2diag.php:76](https://github.com/encedo/hem-api-tester/blob/main/upgrade2diag.php#L76)
-
-## Official Docs vs Encedo Manager
-
-> **DISCREPANCY:** This endpoint is **not documented** in the official docs and **not present** in [Encedo Manager](https://github.com/encedo/encedo-manager). It exists only in the [HEM API test suite](https://github.com/encedo/hem-api-tester), used for USB-based firmware upgrades as an alternative to the web upload flow.
+Test references: [test_7.php:90](https://github.com/encedo/hem-api-tester/blob/main/test_7.php#L90), [upgrade2diag.php:76](https://github.com/encedo/hem-api-tester/blob/main/upgrade2diag.php#L76)

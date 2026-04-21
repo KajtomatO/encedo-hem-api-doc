@@ -1,17 +1,16 @@
 # GET /api/system/selftest
 
-Execute an internal self-test of the device's critical components, including cryptography primitives, random number generator, and key repository integrity.
+Run the device self-test battery (KAT — Known-Answer Tests, entropy check, FLS state) and return the key-repository statistics. Calling this endpoint is the main trigger for `fls_state` to update.
 
 ## Request
 
 ```
 GET /api/system/selftest
-Authorization: Bearer <JWT_TOKEN>
 ```
 
-**Scope:** Any valid access token
-
-**Allowed users:** User, Master, ExtAuth
+**Authentication:**
+- On an **initialised** device: Bearer token required (any valid token — no scope check).
+- On a **fresh/uninitialised** device: no auth.
 
 ## Response
 
@@ -19,58 +18,75 @@ Authorization: Bearer <JWT_TOKEN>
 
 ```json
 {
-  "last_selftest_ts": 1647615622,
+  "last_selftest_ts": 1705312200,
   "last_fls_state": 0,
-  "last_entropytest_ts": 1647615622,
-  "last_kat_ts": 1647606250,
+  "last_entropytest_ts": 1705311000,
+  "last_kat_ts": 1705300000,
   "kat_busy": true,
   "fls_state": 0,
-  "selftest_ts": 1647615642,
+  "selftest_ts": 1705312300,
+  "repo_stats": {
+    "total": 128,
+    "deleted": 5,
+    "invalid": 0,
+    "fragmented": 2,
+    "freeslots": 867
+  },
   "se_state": 0
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `last_selftest_ts` | Number | Timestamp of last self-test |
-| `last_fls_state` | Number | Previous fail state |
-| `last_entropytest_ts` | Number | Timestamp of last entropy test |
-| `last_kat_ts` | Number | Timestamp of last Known Answer Test |
-| `kat_busy` | Boolean | Whether KAT is currently running |
-| `fls_state` | Number | Current fail state (0 = OK) |
-| `selftest_ts` | Number | Current self-test timestamp |
-| `se_state` | Number | Secure Enclave state |
+| Field | Type | When emitted | Description |
+|-------|------|--------------|-------------|
+| `last_selftest_ts` | Number | Always | Timestamp of the previous self-test run (before *this* one). |
+| `last_fls_state` | Number | Always | Fail-state code at the previous run. |
+| `last_entropytest_ts` | Number | Always | Timestamp of the most recent entropy self-test. |
+| `last_kat_ts` | Number | Always | Timestamp of the most recent KAT pass. |
+| `kat_busy` | Boolean `true` | Only when `SELFTEST_KAT_Status()` reports in-progress | Present only if KAT is running; absent otherwise. |
+| `fls_state` | Number | Always | Current fail-state after the re-run triggered by this call. `0` = nominal. |
+| `selftest_ts` | Number | Always | Timestamp of **this** run. |
+| `repo_stats.total` | Number | Always | Total keys in the on-device repository. |
+| `repo_stats.deleted` | Number | Always | Logically deleted slots (reclaimed on compaction). |
+| `repo_stats.invalid` | Number | Always | Slots flagged invalid by integrity check. |
+| `repo_stats.fragmented` | Number | Always | Slots needing compaction. |
+| `repo_stats.freeslots` | Number | Always | Free slots remaining. |
+| `se_state` | Number | PPA only | ATECC608 secure-enclave status. |
+
+### Side effects
+
+- Always runs `self_check(0xFF, now)` — re-executes the full self-test battery.
+- Updates `Session.selftest_user_ts` to `now`.
+- If the RTC was set after previous runs, past timestamps are retro-offset so the returned values are absolute epoch timestamps rather than pre-RTC monotonic counts.
+- Writes an audit-log event `LOG_TYPE_SELFTEST_PASSED` with result `OK` or `FAILED` based on `fls_state`.
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 401 | Missing or invalid JWT token |
-| 403 | Operation failed |
-| 409 | Incorrect internal state |
+| 401 | Device is initialised and Bearer missing/invalid. |
+| 500 | JSON allocation failure. |
+
+## Notes
+
+- `repo_stats` is **only** returned by this endpoint — it is **not** included in `GET /api/system/status`.
+- Calling this endpoint is the canonical way to force a self-test re-run; there is no separate "run" endpoint.
 
 ## Encedo Manager Usage
 
 ```javascript
-// build.js:5069, core2.js:2807
 app.api('api/system/selftest').then(function(data) {
-    // Used in hardware status page to display test results
+    self.encedo_fls_state = data.fls_state;
+    self.encedo_repo_stats = data.repo_stats;
 });
 ```
 
-**Source references:** [build.js:5069](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L5069), [core2.js:2807](https://github.com/encedo/encedo-manager/blob/main/assets/core2.js#L2807)
+Manager references: [encedo.js:313](https://github.com/encedo/encedo-manager/blob/main/assets/encedo.js#L313), [build.js:356](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L356)
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_8.php:67
-$ret_stat = http_transaction("https", "GET", $cfg_domain, "/api/system/selftest", $ret_val, $post_dummy, $token);
+// test_0.php:49
+http_transaction("https", "GET", $cfg_domain, "/api/system/selftest", $ret_val, $post_dummy, $token);
 ```
 
-**Source references:** [test_8.php:67](https://github.com/encedo/hem-api-tester/blob/main/test_8.php#L67), [test_8.php:76](https://github.com/encedo/hem-api-tester/blob/main/test_8.php#L76), [test_8.php:336](https://github.com/encedo/hem-api-tester/blob/main/test_8.php#L336), [test_8.php:345](https://github.com/encedo/hem-api-tester/blob/main/test_8.php#L345)
-
-## Official Docs vs Encedo Manager
-
-**Status:** Documented -- matches [Encedo Manager](https://github.com/encedo/encedo-manager).
-
-> **DISCREPANCY (minor):** The official docs list the response fields including `repo_stats` sub-object (total, deleted, invalid, fragmented, freeslots), but [Encedo Manager](https://github.com/encedo/encedo-manager) doesn't seem to specifically reference those nested fields from this endpoint.
+Test references: [test_0.php:49](https://github.com/encedo/hem-api-tester/blob/main/test_0.php#L49), [test_1.php:51](https://github.com/encedo/hem-api-tester/blob/main/test_1.php#L51)

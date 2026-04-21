@@ -1,28 +1,31 @@
 # POST /api/crypto/pqc/mlkem/encaps
 
-Perform ML-KEM (FIPS 203) encapsulation -- generate a shared secret and ciphertext from an encapsulation key.
+ML-KEM (FIPS 203) encapsulation. Given an encapsulation key already in the repo (`MLKEM512` / `MLKEM768` / `MLKEM1024`), produce a fresh shared secret `ss` and a ciphertext `ct` that the holder of the corresponding decapsulation key can use to recover `ss`.
 
 ## Request
 
 ```
 POST /api/crypto/pqc/mlkem/encaps
-Authorization: Bearer <JWT_TOKEN>
+Authorization: Bearer <token>
 Content-Type: application/json
 ```
 
-**Scope:** `keymgmt:use:{kid}`
+**Authentication:** Bearer required, TLS required.
 
-**Allowed users:** User, ExtAuth
+- **Scope:** **exact** match `keymgmt:use:<kid_hex>`.
+- **Subject:** `sub != "M"`.
+
+**Preconditions:** `fls_state==0`, no software install, initialised, valid JWT, TLS.
+
+### Body
 
 ```json
-{
-  "kid": "32char_hex_key_id"
-}
+{ "kid": "<32_char_hex_mlkem_kid>" }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `kid` | String | Yes | Key ID (32-char hex) -- must reference an MLKEM key |
+| `kid` | String | Yes | 32-char hex of an ML-KEM key in the repo. |
 
 ## Response
 
@@ -30,52 +33,45 @@ Content-Type: application/json
 
 ```json
 {
-  "ct": "base64_encoded_ciphertext",
-  "ss": "base64_encoded_shared_secret",
-  "alg": "MLKEM768"
+  "alg": "MLKEM768",
+  "ss":  "<base64_shared_secret>",
+  "ct":  "<base64_ciphertext>"
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ct` | String | Base64-encoded ciphertext (to send to the other party) |
-| `ss` | String | Base64-encoded shared secret (use for symmetric encryption) |
-| `alg` | String | Algorithm used (MLKEM512, MLKEM768, or MLKEM1024) |
+| Field | Description |
+|-------|-------------|
+| `alg` | One of `MLKEM512`, `MLKEM768`, `MLKEM1024` — determined by the key type on the device. |
+| `ss` | Base64 shared secret, `WC_ML_KEM_SS_SZ` (32) bytes before encoding. |
+| `ct` | Base64 ML-KEM ciphertext; length depends on `alg` (768/1088/1568 bytes). |
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 400 | Incorrect argument(s) |
-| 401 | Missing or invalid JWT token |
-| 403 | Incorrect access scope |
-| 406 | Operation failed |
-| 409 | Incorrect internal state |
-| 418 | TLS connection required |
+| 400 | Malformed JSON, missing `kid`, or bad hex. |
+| 401 | Missing/invalid Bearer. |
+| 403 | Scope not exact `keymgmt:use:<kid>` or `sub == "M"`. |
+| 406 | Key is not ML-KEM or encapsulation failed. |
+| 409 | `fls_state != 0`, software install in progress, or not initialised. |
+| 418 | TLS required. |
 
-### Supported Algorithms
+Audit log: `LOG_TYPE_CRYPTO_PQC_MLKEM_ENCAPS`. Both `ss` and `ct` buffers are zeroed after response.
 
-| Algorithm | Standard |
-|-----------|----------|
-| MLKEM512 | FIPS 203 ML-KEM-512 |
-| MLKEM768 | FIPS 203 ML-KEM-768 |
-| MLKEM1024 | FIPS 203 ML-KEM-1024 |
+## Notes
 
-The algorithm is determined by the key type -- create the key with the desired MLKEM variant via `POST /api/keymgmt/create`.
+- The ML-KEM variant is fixed at key creation — create the key via [`/api/keymgmt/create`](../../keymgmt/create.md) with the desired `MLKEM512/768/1024` type, then reuse its `kid` on encaps.
+- For a full KEM session: encaps on the sender side, send `ct` over the wire, decaps with [`/api/crypto/pqc/mlkem/decaps`](mlkem-decaps.md) on the receiver. Both sides end up with the same `ss`.
 
 ## Encedo Manager Usage
 
-**Not present in [Encedo Manager](https://github.com/encedo/encedo-manager).** This is a newer firmware feature not yet integrated into the Manager UI.
+Not wired into the Manager UI.
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_11.php:858
-$ret_stat = http_transaction("https", "POST", $cfg_domain, "/api/crypto/pqc/mlkem/encaps", $ret_val, $post_array, $token);
+// test_11.php:858
+http_transaction("https", "POST", $cfg_domain, "/api/crypto/pqc/mlkem/encaps", $ret_val, $post_array, $token);
 ```
 
-**Source references:** [test_11.php:858](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L858)
-
-## Official Docs vs Encedo Manager
-
-> **NOTE:** Documented in official docs under `/post-quantum-cryptography/ml-kem`. Not referenced anywhere in the Manager JavaScript.
+Test references: [test_11.php:858](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L858)

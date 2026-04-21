@@ -1,47 +1,55 @@
 # GET /api/system/shutdown
 
-Shut down the device and enter a secure state.
+Stop the web-server tasks and the USB device stack. The device stops responding on the network until power-cycled.
 
 ## Request
 
 ```
 GET /api/system/shutdown
-Authorization: Bearer <JWT_TOKEN>
+Authorization: Bearer <token>
 ```
 
-**Scope:** `system:shutdown` (primary), or `system:config` (alternative)
+**Authentication:** Bearer required **always** (no pre-init shortcut, unlike `reboot` / `upgrade`). Scope must be one of:
+- `system:config`
+- `system:shutdown`
 
-**Allowed users:** User, Master, ExtAuth
+If a firmware/UI install is in progress → `409`.
 
 ## Response
 
-**Status:** `200 OK` -- Device shuts down
+**Status:** `200 OK` is returned **immediately**, with `Connection: close`, then the device waits 2 seconds, calls `udc_stop()` (kills USB), and deletes the web-server task. From that point the device is unreachable via this interface.
+
+No body.
+
+### Side effects
+
+- Audit log entry `LOG_TYPE_SHUTDOWN` with result `OK` (caller's `sub` included).
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 401 | Missing or invalid JWT token |
-| 403 | Incorrect access scope |
-| 409 | Incorrect internal state |
+| 401 | Bearer missing/invalid. |
+| 403 | Scope mismatch (logged as `LOG_TYPE_FAILED_SCOPE_CHECK`). |
+| 409 | Firmware/UI install in progress. |
+
+## Notes
+
+- Unlike `reboot`, this handler does **not** skip auth on uninitialised devices — even a fresh device refuses `401` without a token (though no fresh device has issued any tokens, so shutdown is effectively unavailable pre-init).
+- There is no "wake up" endpoint; recovery from shutdown requires a physical power cycle.
 
 ## Encedo Manager Usage
 
-Not directly invoked from the [Encedo Manager](https://github.com/encedo/encedo-manager) UI, but the scope `system:shutdown` is defined in [scopes.js:89](https://github.com/encedo/encedo-manager/blob/main/assets/scopes.js#L89).
+```javascript
+app.api('api/system/shutdown');
+```
 
-**Source references:** [scopes.js:89](https://github.com/encedo/encedo-manager/blob/main/assets/scopes.js#L89) (scope definition)
+Manager references: [build.js:5192](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L5192)
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_8.php:219
-$ret_stat = http_transaction("https", "GET", $cfg_domain, "/api/system/shutdown", $ret_val, $post_dummy, $token);
+http_transaction("https", "GET", $cfg_domain, "/api/system/shutdown", $ret_val, $post_dummy, $token);
 ```
 
-**Source references:** [test_8.php:219](https://github.com/encedo/hem-api-tester/blob/main/test_8.php#L219)
-
-## Official Docs vs Encedo Manager
-
-**Status:** Documented.
-
-> **DISCREPANCY:** The official docs list this endpoint. [Encedo Manager](https://github.com/encedo/encedo-manager) defines the scope `system:shutdown` in `scopes.js` but there is **no direct API call** to `/api/system/shutdown` in the JavaScript. The scope consent dialog exists, suggesting this endpoint is used by third-party apps or triggered through a different flow not visible in the Manager code.
+Test references: [test_1.php:176](https://github.com/encedo/hem-api-tester/blob/main/test_1.php#L176)

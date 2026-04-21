@@ -8,69 +8,66 @@ Retrieve device operational status, uptime, temperature, and storage state.
 GET /api/system/status
 ```
 
-**Authentication:** Not required (optional -- required for key repository statistics)
-
-**Headers:** None required
+**Authentication:** Not required. No scope check. A Bearer token, if provided, is ignored here — the response contents do not change based on caller identity.
 
 ## Response
 
 **Status:** `200 OK`
 
+Fields are emitted **conditionally** — the exact JSON shape depends on device hardware (PPA vs EPA), TLS availability, and runtime state. The response never contains all of the fields below simultaneously.
+
 ```json
 {
-  "ctx": 1,
-  "fls_state": 0,
+  "inited": false,
+  "https": false,
+  "hostname": "my.ence.do",
+  "tts": 0,
+  "ctx": 0,
   "uptime": 3600,
   "ts": "2024-01-15T10:30:00Z",
   "time": 1705312200,
+  "storage": ["8388607:rw", "8388607:-"],
+  "format": "status3",
   "temp": 35,
-  "storage": ["disk0_status", "disk1_status"],
-  "format": "formatting_state",
-  "fw_upgrade": true,
-  "inited": true,
-  "https": true,
-  "hostname": "my.ence.do",
-  "repo_stats": {
-    "deleted": 0,
-    "fragmentation": 0,
-    "freespace": 1024,
-    "invalid": 0,
-    "total": 100
-  },
-  "tts": true
+  "fls_state": 0,
+  "fw_upgrade": true
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ctx` | Number | Context number |
-| `fls_state` | Number | Fail state value (0 = no errors) |
-| `uptime` | Number | Seconds since device boot |
-| `ts` | String | Current time in ISO 8601 (if RTC is set) |
-| `time` | Number | Current Unix timestamp (if RTC is set) |
-| `temp` | Number | Chip temperature in Celsius |
-| `storage` | Array | Capacity and status of each embedded disk |
-| `format` | String | Optional. Disk formatting state during personalization |
-| `fw_upgrade` | Boolean | Optional. Indicates successful reboot post-upgrade |
-| `inited` | Boolean | Optional. `false` if device is unpersonalized |
-| `https` | Boolean | Optional. HTTPS availability |
-| `hostname` | String | Optional. Device hostname |
-| `repo_stats` | Object | Key repository memory stats (requires auth) |
-| `tts` | Boolean | Optional. `false` if TrustedTime is disabled |
+| Field | Type | When emitted | Description |
+|-------|------|--------------|-------------|
+| `inited` | Boolean | Only when device is **not** initialised | Always `false` when present; when the device is initialised the key is omitted entirely. Callers should treat "key absent" as `inited: true`. |
+| `https` | Boolean | Only when the request arrived over **plain HTTP** | `true` = HTTPS listener is up and the caller may upgrade; `false` = HTTPS not yet available (e.g. no provisioned TLS cert). The field is deliberately absent on TLS-reachable requests. |
+| `hostname` | String | Only when the HTTP `Host` header does **not** start with the configured device hostname | Lets the Manager detect misrouted requests and redirect to the configured hostname. |
+| `tts` | Number `0` | Only when [`trusted_ts`](../concepts/device-options.md#trusted_ts--trust-the-on-device-rtc) option is **false** | Explicit marker that the device is running in untrusted-time mode (i.e. accepts client-supplied `iat` to prime its RTC). When `trusted_ts` is true the field is omitted. |
+| `ctx` | Number | Always | Instance context id (`MainCfg.context`), set on init and updatable via `POST /api/system/config`. Opaque to the device — provided for caller-side correlation. |
+| `uptime` | Number | Always | Seconds since boot. Primary "device reachable" signal for polling clients. |
+| `ts` | String | Only when RTC is set | Current device time in `YYYY-MM-DDTHH:MM:SSZ` format. |
+| `time` | Number | Only when RTC is set | Current Unix timestamp (seconds). |
+| `storage` | Array of string | PPA only (`USB_MSC_AVAILABLE` build) | Two entries, one per onboard microSD slot, in the form `"<sector_count-1>:<mode>"` where mode is `rw`, `ro`, or `-` (slot not ready). |
+| `format` | String | PPA only, while a format operation is in progress | `"status1"`…`"status9"` mirror the running formatter state; `"done"` once complete. Field is absent when idle. |
+| `temp` | Number | Always | Die temperature from `Session.temperature` (°C). |
+| `fls_state` | Number | Always | Fail-state code from `Session.fls_status`. `0` = nominal. Non-zero values indicate a self-test or integrity failure; high bits (`0x40`, `0x80`) are set by the remote-lock/brick flow in `POST /api/system/checkin`. |
+| `fw_upgrade` | Boolean `true` | Only on the first status read after a successful firmware upgrade | Indicates the device has just rebooted into a newly installed firmware. Consumed/cleared by the boot sequence. |
+
+### Notes on caller behaviour
+
+- The response is intentionally **sparse** — do not require any field except `uptime`, `temp`, `fls_state`, and `ctx` in parsers. Specifically, `inited`, `https`, and `tts` only appear when they carry information.
+- Key-repository statistics (`repo_stats`) are **not** returned by this endpoint on current firmware; they are served by `GET /api/system/selftest` only. See [system/selftest.md](selftest.md).
 
 ## Encedo Manager Usage
 
 ```javascript
-// Used for connection detection, status polling, storage state checking
-// encedo.js:222, build.js:265, build.js:3510, build.js:7710-7718
+// Connection detection, status polling, storage UI
 app.api('api/system/status').then(function(data) {
-    // data.uptime used to detect device presence
-    // data.storage used to show disk states
-    // data.inited used to determine init vs auth flow
+    // data.uptime     → "device reachable"
+    // data.inited     → "absent" means initialised; if false, show the init wizard
+    // data.https      → if present and true, redirect HTTP→HTTPS
+    // data.storage[0] → "<sectors>:rw|ro|-" for disk0 UI
 });
 ```
 
-**Source references:** [encedo.js:222](https://github.com/encedo/encedo-manager/blob/main/assets/encedo.js#L222), [build.js:265](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L265), [build.js:347](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L347), [build.js:3510](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L3510), [build.js:7710](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L7710), [core2.js:1257](https://github.com/encedo/encedo-manager/blob/main/assets/core2.js#L1257), [core2.js:5418](https://github.com/encedo/encedo-manager/blob/main/assets/core2.js#L5418), launch.html:91
+Manager references: [encedo.js:222](https://github.com/encedo/encedo-manager/blob/main/assets/encedo.js#L222), [build.js:265](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L265), [build.js:3510](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L3510), [build.js:7710](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L7710), [core2.js:1257](https://github.com/encedo/encedo-manager/blob/main/assets/core2.js#L1257)
 
 ## Test Suite Usage
 
@@ -79,15 +76,4 @@ app.api('api/system/status').then(function(data) {
 $ret_stat = http_transaction("https", "GET", $cfg_domain, "/api/system/status", $ret_val, $post_dummy, $token);
 ```
 
-**Source references:** [test_0.php:37](https://github.com/encedo/hem-api-tester/blob/main/test_0.php#L37), [test_1.php:39](https://github.com/encedo/hem-api-tester/blob/main/test_1.php#L39), [test_7.php:56](https://github.com/encedo/hem-api-tester/blob/main/test_7.php#L56), [test_8.php:34](https://github.com/encedo/hem-api-tester/blob/main/test_8.php#L34)
-
-## Notes
-
-- This endpoint is polled continuously for connection status monitoring.
-- The `uptime` field is the primary indicator that the device is connected and responsive.
-- The `inited` field determines whether to show the personalization wizard or the login screen.
-- The `storage` array is used to display disk0/disk1 lock/unlock states.
-
-## Official Docs vs Encedo Manager
-
-**Status:** Documented -- matches [Encedo Manager](https://github.com/encedo/encedo-manager).
+Test references: [test_0.php:37](https://github.com/encedo/hem-api-tester/blob/main/test_0.php#L37), [test_1.php:39](https://github.com/encedo/hem-api-tester/blob/main/test_1.php#L39), [test_7.php:56](https://github.com/encedo/hem-api-tester/blob/main/test_7.php#L56), [test_8.php:34](https://github.com/encedo/hem-api-tester/blob/main/test_8.php#L34)

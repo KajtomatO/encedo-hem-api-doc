@@ -1,30 +1,35 @@
 # POST /api/crypto/pqc/mlkem/decaps
 
-Perform ML-KEM (FIPS 203) decapsulation -- extract a shared secret from ciphertext using the decapsulation key.
+ML-KEM (FIPS 203) decapsulation. Given a decapsulation private key in the repo and a ciphertext from an encapsulator (see [`/api/crypto/pqc/mlkem/encaps`](mlkem-encaps.md)), recover the shared secret.
 
 ## Request
 
 ```
 POST /api/crypto/pqc/mlkem/decaps
-Authorization: Bearer <JWT_TOKEN>
+Authorization: Bearer <token>
 Content-Type: application/json
 ```
 
-**Scope:** `keymgmt:use:{kid}`
+**Authentication:** Bearer required, TLS required.
 
-**Allowed users:** User, ExtAuth
+- **Scope:** **exact** match `keymgmt:use:<kid_hex>`.
+- **Subject:** `sub != "M"`.
+
+**Preconditions:** `fls_state==0`, no software install, initialised, valid JWT, TLS.
+
+### Body
 
 ```json
 {
-  "kid": "32char_hex_key_id",
-  "ct": "base64_encoded_ciphertext"
+  "kid": "<32_char_hex_mlkem_kid>",
+  "ct":  "<base64_ciphertext>"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `kid` | String | Yes | Key ID (32-char hex) -- must reference an MLKEM key |
-| `ct` | String | Yes | Base64-encoded ciphertext from encapsulation |
+| `kid` | String | Yes | 32-char hex of an ML-KEM key in the repo. |
+| `ct` | String | Yes | Base64 ML-KEM ciphertext from encaps. Decoded length ≤ `WC_ML_KEM_MAX_CIPHER_TEXT_SIZE`. |
 
 ## Response
 
@@ -32,38 +37,42 @@ Content-Type: application/json
 
 ```json
 {
-  "ss": "base64_encoded_shared_secret"
+  "alg": "MLKEM768",
+  "ss":  "<base64_shared_secret>"
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ss` | String | Base64-encoded shared secret (matches the encapsulator's `ss`) |
+| Field | Description |
+|-------|-------------|
+| `alg` | One of `MLKEM512`, `MLKEM768`, `MLKEM1024`. |
+| `ss` | Base64 shared secret, 32 bytes. Matches the encapsulator's `ss` on success. |
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 400 | Incorrect argument(s) |
-| 401 | Missing or invalid JWT token |
-| 403 | Incorrect access scope |
-| 406 | Operation failed |
-| 409 | Incorrect internal state |
-| 418 | TLS connection required |
+| 400 | Malformed JSON, missing `kid`/`ct`, bad hex/base64, or ciphertext too long. |
+| 401 | Missing/invalid Bearer. |
+| 403 | Scope not exact `keymgmt:use:<kid>` or `sub == "M"`. |
+| 406 | Key is not ML-KEM, ciphertext not valid for the variant, or decapsulation failure. |
+| 409 | `fls_state != 0`, software install in progress, or not initialised. |
+| 418 | TLS required. |
+
+Audit log: `LOG_TYPE_CRYPTO_PQC_MLKEM_DECAPS`. `ss` buffer is zeroed after response.
+
+## Notes
+
+- ML-KEM has implicit rejection: a corrupted / wrong ciphertext will still succeed with a pseudo-random `ss` rather than returning an error. Use paired protocols (e.g. HMAC on a derived key) to detect bad inputs.
 
 ## Encedo Manager Usage
 
-**Not present in [Encedo Manager](https://github.com/encedo/encedo-manager).** See [mlkem-encaps.md](mlkem-encaps.md) for details.
+Not wired into the Manager UI.
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_11.php:867
-$ret_stat = http_transaction("https", "POST", $cfg_domain, "/api/crypto/pqc/mlkem/decaps", $ret_val, $post_array, $token);
+// test_11.php:867
+http_transaction("https", "POST", $cfg_domain, "/api/crypto/pqc/mlkem/decaps", $ret_val, $post_array, $token);
 ```
 
-**Source references:** [test_11.php:867](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L867)
-
-## Official Docs vs Encedo Manager
-
-> **NOTE:** Documented in official docs. Not in [Encedo Manager](https://github.com/encedo/encedo-manager).
+Test references: [test_11.php:867](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L867)

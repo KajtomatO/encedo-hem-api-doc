@@ -1,31 +1,31 @@
-# GET /api/keymgmt/list/:offset/:limit
+# GET /api/keymgmt/list[/{offset}[/{limit}]]
 
-List keys stored in the secure repository with pagination.
+Paginated listing of every key in the repository. Returns metadata only; use [`/api/keymgmt/get/{kid}`](get.md) to retrieve public material.
 
 ## Request
 
 ```
-GET /api/keymgmt/list/:offset/:limit
-Authorization: Bearer <JWT_TOKEN>
+GET /api/keymgmt/list                   # offset=0, limit=15
+GET /api/keymgmt/list/20                # skip 20, limit=15
+GET /api/keymgmt/list/20/10             # skip 20, limit=10 (capped to 15)
+Authorization: Bearer <token>
 ```
 
-**Scope:** `keymgmt:list`
+**Authentication:** Bearer required, TLS required.
 
-**Allowed users:** User, ExtAuth (Master not allowed)
+- **Scope:** prefix-match `keymgmt:list`.
+- **Subject:** `sub != "M"`.
 
-### Path Parameters
+**Preconditions:** `fls_state==0`, no software install, initialised, valid JWT, TLS.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `offset` | Number | No | Number of entries to skip (default: 0) |
-| `limit` | Number | No | Max entries to return (default: 15) |
+### Path parameters
 
-### URL Variants
+| Parameter | Type | Default | Notes |
+|-----------|------|---------|-------|
+| `offset` | Integer | `0` | Skip the first N entries. |
+| `limit` | Integer | `15` | Hard-capped server-side at `15`. Asking for more returns 15. |
 
-[Encedo Manager](https://github.com/encedo/encedo-manager) uses three URL patterns:
-- `api/keymgmt/list` -- no pagination
-- `api/keymgmt/list/{offset}` -- offset only
-- `api/keymgmt/list/{offset}/{limit}` -- offset + limit
+Malformed / non-integer suffix segments return `406`.
 
 ## Response
 
@@ -33,73 +33,62 @@ Authorization: Bearer <JWT_TOKEN>
 
 ```json
 {
-  "offset": 0,
-  "total": 25,
-  "listed": 15,
+  "offset": 20,
+  "total":  100,
+  "listed": 10,
   "list": [
     {
-      "kid": "09bd0958e1499ecfd51ea62a3f49a84c",
+      "kid":     "09bd0958e1499ecfd51ea62a3f49a84c",
       "created": 1647787070,
-      "type": "ED25519",
-      "label": "My key",
-      "descr": "base64_encoded_description",
-      "updated": 1647787070
+      "updated": 1647787070,
+      "type":    "ED25519",
+      "label":   "My signing key",
+      "descr":   "<base64_blob>"
     }
   ]
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `offset` | Number | Starting position |
-| `total` | Number | Total number of keys |
-| `listed` | Number | Number of keys in this response |
-| `list` | Array | Array of key objects |
-| `list[].kid` | String | Key ID (32-char hex) |
-| `list[].created` | Number | Creation timestamp |
-| `list[].type` | String | Key algorithm type |
-| `list[].label` | String | Key label |
-| `list[].descr` | String | Base64-encoded description |
-| `list[].updated` | Number | Last update timestamp |
+| Field | Description |
+|-------|-------------|
+| `offset` | Echo of the effective offset. |
+| `total` | Total number of keys in the repo. |
+| `listed` | Number of entries in `list` (≤ `limit`). |
+| `list[].kid` | 32-char hex key id. |
+| `list[].type` | Algorithm string (same vocabulary as [get](get.md)). |
+| `list[].label` | Human label as stored. |
+| `list[].descr` | Base64 opaque blob; absent if empty. |
+| `list[].created` / `list[].updated` | Unix timestamps. |
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 400 | Incorrect argument(s) |
-| 401 | Missing or invalid JWT token |
-| 403 | Incorrect access scope |
-| 406 | Operation failed |
-| 409 | Incorrect internal state |
-| 418 | TLS connection required |
+| 401 | Missing/invalid Bearer. |
+| 403 | Wrong scope or `sub == "M"`. |
+| 406 | Non-integer path suffix, or repo list failure. |
+| 409 | `fls_state != 0`, software install in progress, or not initialised. |
+| 418 | TLS required. |
+
+## Notes
+
+- The **15-item cap** is a server limit; to walk the whole repo, paginate by passing increasing `offset`.
+- Listing returns *every* key in the repo, including the user-supplied Curve25519 persona keys planted at init (`masterkey`, `userkey`), ExtAuth paired-authenticator public keys (descriptor-prefix `EXTAID`), and TLS certs. Filter client-side by `type`, `label`, or the `descr` field, or use [`/api/keymgmt/search`](search.md) for server-side `descr` filtering.
 
 ## Encedo Manager Usage
 
 ```javascript
-// build.js:6043, core2.js:3748
-// Paginated list with offset appended to URL
-app.api('api/keymgmt/list' + offset).then(function(data) {
-    // data.list contains the key array
-    // data.total used for pagination
-});
+// build.js:6043
+app.api('api/keymgmt/list' + offset).then(data => { /* data.list, data.total */ });
 ```
 
-**Source references:** [build.js:6043](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L6043), [core2.js:3748](https://github.com/encedo/encedo-manager/blob/main/assets/core2.js#L3748)
+Manager references: [build.js:6043](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L6043), [core2.js:3748](https://github.com/encedo/encedo-manager/blob/main/assets/core2.js#L3748)
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_10.php:68
-$ret_stat = http_transaction("https", "GET", $cfg_domain, "/api/keymgmt/list", $ret_val, "", $token);
-
-// hem-api-tester/test_8.php:300
-$ret_stat = http_transaction("https", "GET", $cfg_domain, "/api/keymgmt/list", $ret_val, "", $token);
+// test_10.php:68
+http_transaction("https", "GET", $cfg_domain, "/api/keymgmt/list", $ret_val, "", $token);
 ```
 
-**Source references:** [test_10.php:68](https://github.com/encedo/hem-api-tester/blob/main/test_10.php#L68), [test_8.php:300](https://github.com/encedo/hem-api-tester/blob/main/test_8.php#L300)
-
-## Official Docs vs Encedo Manager
-
-**Status:** Documented -- largely matches.
-
-> **DISCREPANCY:** The `_endpoints` map ([build.js:9195](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L9195)) registers a **POST** variant of `/api/keymgmt/list` described as "List stored keys (extended version)". The official docs only document the **GET** variant. [Encedo Manager](https://github.com/encedo/encedo-manager) only uses the GET variant with path parameters. The POST variant may accept filter criteria in the body, but this is undocumented.
+Test references: [test_10.php:68](https://github.com/encedo/hem-api-tester/blob/main/test_10.php#L68), [test_8.php:300](https://github.com/encedo/hem-api-tester/blob/main/test_8.php#L300)

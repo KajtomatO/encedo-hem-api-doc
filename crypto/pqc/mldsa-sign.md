@@ -1,32 +1,37 @@
 # POST /api/crypto/pqc/mldsa/sign
 
-Generate an ML-DSA (FIPS 204) post-quantum digital signature.
+Produce an ML-DSA (FIPS 204) post-quantum signature over a message using a private key already in the repo (`MLDSA44` / `MLDSA65` / `MLDSA87`).
 
 ## Request
 
 ```
 POST /api/crypto/pqc/mldsa/sign
-Authorization: Bearer <JWT_TOKEN>
+Authorization: Bearer <token>
 Content-Type: application/json
 ```
 
-**Scope:** `keymgmt:use:{kid}`
+**Authentication:** Bearer required, TLS required.
 
-**Allowed users:** User, ExtAuth
+- **Scope:** **exact** match `keymgmt:use:<kid_hex>`.
+- **Subject:** `sub != "M"`.
+
+**Preconditions:** `fls_state==0`, no software install, initialised, valid JWT, TLS.
+
+### Body
 
 ```json
 {
-  "kid": "32char_hex_key_id",
-  "msg": "base64_encoded_message",
-  "ctx": "base64_encoded_context"
+  "kid": "<32_char_hex_mldsa_kid>",
+  "msg": "<base64_message>",
+  "ctx": "<base64_context>"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `kid` | String | Yes | Key ID (32-char hex) -- must reference an MLDSA key |
-| `msg` | String | Yes | Base64-encoded message to sign (max 2048 bytes) |
-| `ctx` | String | No | Base64-encoded context data (max 255 bytes) |
+| `kid` | String | Yes | 32-char hex of an ML-DSA key in the repo. |
+| `msg` | String | Yes | Base64 plaintext. Decoded length ≤ `MAX_API_POST_CRYTO_MSG_LEN`. |
+| `ctx` | String | No | Base64 signing context. Decoded length ≤ 255 bytes (FIPS 204 cap). |
 
 ## Response
 
@@ -34,50 +39,42 @@ Content-Type: application/json
 
 ```json
 {
-  "sign": "base64_encoded_signature",
-  "alg": "MLDSA65"
+  "alg":  "MLDSA65",
+  "sign": "<base64_signature>"
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `sign` | String | Base64-encoded ML-DSA signature |
-| `alg` | String | Algorithm used (MLDSA44, MLDSA65, or MLDSA87) |
+| Field | Description |
+|-------|-------------|
+| `alg` | One of `MLDSA44`, `MLDSA65`, `MLDSA87` — determined by the key on device. |
+| `sign` | Base64 ML-DSA signature. Length depends on variant (2420 / 3309 / 4627 bytes). |
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 400 | Incorrect argument(s) |
-| 401 | Missing or invalid JWT token |
-| 403 | Incorrect access scope |
-| 406 | Operation failed |
-| 409 | Incorrect internal state |
-| 418 | TLS connection required |
+| 400 | Malformed JSON, missing `kid`/`msg`, or base64/hex decode failure. |
+| 401 | Missing/invalid Bearer. |
+| 403 | Scope not exact `keymgmt:use:<kid>` or `sub == "M"`. |
+| 406 | Key not ML-DSA or signing failure. |
+| 409 | `fls_state != 0`, software install in progress, or not initialised. |
+| 418 | TLS required. |
 
-### Supported Algorithms
+Audit log: `LOG_TYPE_CRYPTO_PQC_MLDSA_SIGN`. Signature buffer is zeroed after response.
 
-| Algorithm | Standard |
-|-----------|----------|
-| MLDSA44 | FIPS 204 ML-DSA-44 |
-| MLDSA65 | FIPS 204 ML-DSA-65 |
-| MLDSA87 | FIPS 204 ML-DSA-87 |
+## Notes
 
-The algorithm is determined by the key type -- create the key with the desired MLDSA variant via `POST /api/keymgmt/create`.
+- The ML-DSA variant is fixed at key creation. Create the key via [`/api/keymgmt/create`](../../keymgmt/create.md).
 
 ## Encedo Manager Usage
 
-**Not present in [Encedo Manager](https://github.com/encedo/encedo-manager).** This is a newer firmware feature. Keys of type MLDSA44/65/87 can be created via `/api/keymgmt/create` (which is in [Encedo Manager](https://github.com/encedo/encedo-manager)), but the signing endpoint is not yet integrated into the Manager UI.
+Not wired into the Manager UI. Key creation paths in Manager cover `MLDSA*` types but signing is not invoked.
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_11.php:922
-$ret_stat = http_transaction("https", "POST", $cfg_domain, "/api/crypto/pqc/mldsa/sign", $ret_val, $post_array, $token);
+// test_11.php:922
+http_transaction("https", "POST", $cfg_domain, "/api/crypto/pqc/mldsa/sign", $ret_val, $post_array, $token);
 ```
 
-**Source references:** [test_11.php:922](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L922)
-
-## Official Docs vs Encedo Manager
-
-> **NOTE:** Documented in official docs under `/post-quantum-cryptography/ml-dsa`. Not referenced anywhere in the Manager JavaScript. The endpoint path uses `/api/crypto/pqc/` prefix, different from classical crypto endpoints which use `/api/crypto/`.
+Test references: [test_11.php:922](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L922)

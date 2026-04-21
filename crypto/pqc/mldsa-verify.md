@@ -1,63 +1,66 @@
 # POST /api/crypto/pqc/mldsa/verify
 
-Verify an ML-DSA (FIPS 204) post-quantum digital signature.
+Verify an ML-DSA (FIPS 204) signature against a message using a public key in the repo.
 
 ## Request
 
 ```
 POST /api/crypto/pqc/mldsa/verify
-Authorization: Bearer <JWT_TOKEN>
+Authorization: Bearer <token>
 Content-Type: application/json
 ```
 
-**Scope:** `keymgmt:use:{kid}`
+**Authentication:** Bearer required, TLS required.
 
-**Allowed users:** User, ExtAuth
+- **Scope:** **exact** match `keymgmt:use:<kid_hex>`.
+- **Subject:** `sub != "M"`.
+
+**Preconditions:** `fls_state==0`, no software install, initialised, valid JWT, TLS.
+
+### Body
 
 ```json
 {
-  "kid": "32char_hex_key_id",
-  "msg": "base64_encoded_message",
-  "sign": "base64_encoded_signature",
-  "ctx": "base64_encoded_context"
+  "kid":  "<32_char_hex_mldsa_kid>",
+  "msg":  "<base64_message>",
+  "sign": "<base64_signature>",
+  "ctx":  "<base64_context>"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `kid` | String | Yes | Key ID (32-char hex) -- must reference an MLDSA key |
-| `msg` | String | Yes | Base64-encoded message (max 2048 bytes) |
-| `sign` | String | Yes | Base64-encoded signature to verify |
-| `ctx` | String | No | Base64-encoded context data (max 64 bytes) |
+| `kid` | String | Yes | 32-char hex of an ML-DSA key. |
+| `msg` | String | Yes | Base64 plaintext. Decoded length ≤ `MAX_API_POST_CRYTO_MSG_LEN`. |
+| `sign` | String | Yes | Base64 signature. Decoded length ≤ `DILITHIUM_ML_DSA_87_SIG_SIZE` (4627). |
+| `ctx` | String | No | Base64 signing context. Decoded length ≤ 255 bytes (matches the `ctx` limit on sign). |
 
 ## Response
 
-**Status:** `200 OK` -- Signature verified successfully
+**Status:** `200 OK` — no body on successful verification.
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 400 | Incorrect argument(s) |
-| 401 | Missing or invalid JWT token |
-| 403 | Incorrect access scope |
-| 406 | Operation failed (verification failed) |
-| 409 | Incorrect internal state |
-| 418 | TLS connection required |
+| 400 | Malformed JSON, missing `kid`/`msg`/`sign`, or decode failure. |
+| 401 | Missing/invalid Bearer. |
+| 403 | Scope not exact `keymgmt:use:<kid>` or `sub == "M"`. |
+| 406 | Signature invalid for the given `msg`+`ctx`+key, or wrong key type. |
+| 409 | `fls_state != 0`, software install in progress, or not initialised. |
+| 418 | TLS required. |
+
+Audit log: `LOG_TYPE_CRYPTO_PQC_MLDSA_VERIFY`.
 
 ## Encedo Manager Usage
 
-**Not present in [Encedo Manager](https://github.com/encedo/encedo-manager).** See [mldsa-sign.md](mldsa-sign.md) for details.
+Not wired into the Manager UI.
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_11.php:930
-$ret_stat = http_transaction("https", "POST", $cfg_domain, "/api/crypto/pqc/mldsa/verify", $ret_val, $post_array, $token);
+// test_11.php:930
+http_transaction("https", "POST", $cfg_domain, "/api/crypto/pqc/mldsa/verify", $ret_val, $post_array, $token);
 ```
 
-**Source references:** [test_11.php:930](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L930)
-
-## Official Docs vs Encedo Manager
-
-> **NOTE:** Documented in official docs. Not in [Encedo Manager](https://github.com/encedo/encedo-manager). Note the `ctx` max size differs between sign (255 bytes) and verify (64 bytes) per the official docs.
+Test references: [test_11.php:930](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L930)

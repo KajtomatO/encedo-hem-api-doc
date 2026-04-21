@@ -1,73 +1,87 @@
-# GET /api/storage/unlock/:mode
+# GET /api/storage/unlock[/{ro|rw}]
 
-Unlock an embedded disk for reading or writing. Encedo PPA only.
+Mount an embedded microSD partition for host-side access over USB-MSC. **PPA only** (compiled behind `USB_MSC_AVAILABLE`; EPA returns `404`).
 
-The disk number and access mode are determined by the JWT token's scope, not by URL parameters. However, [Encedo Manager](https://github.com/encedo/encedo-manager) uses `/ro` and `/rw` suffixes to indicate the desired access mode.
+The disk number (`0` or `1`) is determined from the JWT **scope suffix**, not the URL path. The optional URL suffix (`/ro` or `/rw`) lets the caller request a narrower access mode than the scope allows.
 
 ## Request
 
 ```
-GET /api/storage/unlock/ro
-GET /api/storage/unlock/rw
-Authorization: Bearer <JWT_TOKEN>
+GET /api/storage/unlock            # mode = from scope (rw if ":rw" present)
+GET /api/storage/unlock/ro         # force read-only (requires scope with or without ":rw")
+GET /api/storage/unlock/rw         # force read-write (requires scope ending with ":rw")
+Authorization: Bearer <token>
 ```
 
-**Scopes:**
-- `storage:disk0` -- Unlock primary (regular) storage, read-only
-- `storage:disk0:rw` -- Unlock primary storage, read-write
-- `storage:disk1` -- Unlock hidden (encrypted) storage, read-only
-- `storage:disk1:rw` -- Unlock hidden storage, read-write
+### Scopes
 
-**Availability:** Encedo PPA only (EPA returns 404)
+The scope prefix is literal `storage:disk` followed by a digit and optional `:rw`:
+
+| Scope | Disk | Mode |
+|-------|------|------|
+| `storage:disk0` | Plaintext partition | Read-only |
+| `storage:disk0:rw` | Plaintext partition | Read-write |
+| `storage:disk1` | Encrypted partition (`StoragePlainSize < SDCardSize`, see [`storage_mode`](../concepts/device-options.md#storage_mode--storage-layout--crypto-mode)) | Read-only |
+| `storage:disk1:rw` | Encrypted partition | Read-write |
+
+Subject (`sub`) must **not** be `"M"` — master-key tokens cannot unlock disks.
+
+**Preconditions:**
+1. `fls_state == 0` — otherwise `409`.
+2. Initialised — otherwise `409`.
+3. No disk format in progress — otherwise `409`.
+4. Valid Bearer — otherwise `401`.
+
+### Path/scope combinations
+
+| URL suffix | Scope form | Resulting mode |
+|------------|------------|----------------|
+| *(none)* | `storage:diskN` | Read-only |
+| *(none)* | `storage:diskN:rw` | Read-write |
+| `/ro` | either | Read-only |
+| `/rw` | `storage:diskN:rw` | Read-write |
+| `/rw` | `storage:diskN` (no `:rw`) | `406` |
+| anything else | — | `406` |
+
+In `DEBUG` builds, disk `2` is also accepted (third card slot). Production builds accept only `0` and `1`.
 
 ## Response
 
-**Status:** `200 OK`
+**Status:** `200 OK` on success. No body.
+
+The device sets `sd_card_map[disk_no].writable` (0/1) and `sd_card_map[disk_no].ready = 2`, which causes the USB-MSC task to expose the partition to the connected host.
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 401 | Missing or invalid JWT token |
-| 403 | Incorrect access scope |
-| 406 | Operation failed |
-| 409 | Incorrect internal state |
+| 401 | Missing/invalid Bearer. |
+| 403 | Scope doesn't start with `storage:disk` or `sub == "M"`. |
+| 406 | Scope digit not `0`/`1`, path suffix not `/ro`/`/rw`, or `/rw` asked with a non-`:rw` scope. |
+| 409 | `fls_state != 0`, not initialised, or disk format in progress. |
+
+No success audit event is emitted — only scope failures are logged (`LOG_TYPE_FAILED_SCOPE_CHECK`).
+
+## Notes
+
+- **"Unlock" is not a crypto operation here.** For disk 1 (encrypted), the key material is already in RAM once the device is initialised and selftest passes; the endpoint only flips the USB-MSC visibility flags. Decryption-at-rest happens transparently in the hardware XTS engine during USB reads/writes.
+- The plain `GET /api/storage/unlock` path with no suffix is supported and matches what the test suite uses. The `/ro` and `/rw` path variants exist as an override mechanism for the Manager UI.
 
 ## Encedo Manager Usage
 
 ```javascript
-// build.js:7729-7817, core2.js:5437-5525
-// Determine endpoint based on user's write permission choice
-var endpoint = 'api/storage/unlock/ro';
-if (writePermission) {
-    endpoint = 'api/storage/unlock/rw';
-}
-app.api(endpoint).then(function(data) {
-    // Check status after unlock
-    app.api('api/system/status').then(function(data) {
-        // Verify storage state changed
-    });
-});
+// build.js:7729-7817
+var endpoint = writePermission ? 'api/storage/unlock/rw' : 'api/storage/unlock/ro';
+app.api(endpoint).then(() => app.api('api/system/status'));
 ```
 
-**Source references:** [build.js:1813](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L1813), [build.js:7729-7817](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L7729), [core2.js:5437-5525](https://github.com/encedo/encedo-manager/blob/main/assets/core2.js#L5437)
+Manager references: [build.js:7729](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L7729), [core2.js:5437](https://github.com/encedo/encedo-manager/blob/main/assets/core2.js#L5437)
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_12.php:77
-$ret_stat = http_transaction("https", "GET", $cfg_domain, "/api/storage/unlock", $ret_val, "", $token);
-
-// hem-api-tester/test_12.php:87
-$ret_stat = http_transaction("https", "GET", $cfg_domain, "/api/storage/unlock", $ret_val, "", $token);
+// test_12.php:77
+http_transaction("https", "GET", $cfg_domain, "/api/storage/unlock", $ret_val, "", $token);
 ```
 
-**Source references:** [test_12.php:77](https://github.com/encedo/hem-api-tester/blob/main/test_12.php#L77), [test_12.php:87](https://github.com/encedo/hem-api-tester/blob/main/test_12.php#L87)
-
-## Official Docs vs Encedo Manager
-
-> **DISCREPANCY (URL path):** The official docs show the endpoint as simply `/api/storage/unlock` and state that disk number and mode are derived from the JWT scope. [Encedo Manager](https://github.com/encedo/encedo-manager) uses `/api/storage/unlock/ro` and `/api/storage/unlock/rw` suffixes. The older `encedo.js:1691` uses the plain `/api/storage/unlock` without suffix, while the newer `build.js` and `core2.js` consistently use `/ro` or `/rw` suffixes. The `/ro` and `/rw` path variants are **not documented** in the official docs.
-
-> **DISCREPANCY (endpoint registry):** The `_endpoints` map registers `/api/storage/unlock` four times (for each disk/mode combination), all as `GET` with no path suffixes. The actual code uses path suffixes `/ro` and `/rw`.
-
-> **TEST SUITE NOTE:** The [HEM API test suite](https://github.com/encedo/hem-api-tester) (`test_4.php`) uses the plain `/api/storage/unlock` path (no `/ro` or `/rw` suffix), aligning with the official docs and the endpoint registry -- not [Encedo Manager](https://github.com/encedo/encedo-manager). This suggests the `/ro` and `/rw` suffixes are a Manager-specific convention, and the device accepts the plain path.
+Test references: [test_12.php:77](https://github.com/encedo/hem-api-tester/blob/main/test_12.php#L77), [test_12.php:87](https://github.com/encedo/hem-api-tester/blob/main/test_12.php#L87)

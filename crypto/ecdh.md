@@ -1,73 +1,84 @@
 # POST /api/crypto/ecdh
 
-Perform an Elliptic Curve Diffie-Hellman key exchange, returning either raw or hashed result.
+Run a raw ECDH against a peer public key and return the shared secret directly, or the hash of the shared secret if `alg` is supplied.
+
+Unlike [`/api/keymgmt/derive`](../keymgmt/derive.md), which feeds the ECDH output through HKDF and stores the result as a new repo key, `/api/crypto/ecdh` returns the raw shared bytes to the caller and stores nothing.
 
 ## Request
 
 ```
 POST /api/crypto/ecdh
-Authorization: Bearer <JWT_TOKEN>
+Authorization: Bearer <token>
 Content-Type: application/json
 ```
 
-**Scope:** `keymgmt:use:{kid}#{descr}`
+**Authentication:** Bearer required, TLS required.
+
+- **Scope:** **exact** match `keymgmt:use:<kid_hex>`.
+- **Subject:** `sub != "M"`.
+
+**Preconditions:** `fls_state==0`, no software install, initialised, valid JWT, TLS.
+
+### Body
 
 ```json
 {
-  "kid": "32char_hex_key_id",
-  "pubkey": "base64_external_public_key",
-  "ext_kid": "32char_hex_external_key_id",
-  "alg": "SHA2-256"
+  "kid":     "<32_char_hex_kid>",
+  "ext_kid": "<32_char_hex_peer_kid>",
+  "pubkey":  "<base64_peer_public_key>",
+  "alg":     "SHA2-256"
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `kid` | String | Yes | Key ID (32-char hex) |
-| `pubkey` | String | No | Base64-encoded external public key |
-| `ext_kid` | String | No | External key ID (32-char hex) |
-| `alg` | String | No | Hash algorithm (omit for raw ECDH) |
+| `kid` | String | Yes | 32-char hex. Must be an ECDH-capable private key (Curve25519, Curve448, or a NIST-P / secp256k1 key in `mode: "ECDH"`). |
+| `ext_kid` | String | One of | Peer public key already in the repo. |
+| `pubkey` | String | One of | Base64 raw peer public key (≤ 66 bytes, fits P-521). |
+| `alg` | String | No | Hash applied to the shared secret before return. Omit for raw bytes. |
 
-Either `pubkey` or `ext_kid` must be provided. The key type of `ext_kid` or `pubkey` must match the `kid` key type.
+Exactly one of `ext_kid` / `pubkey` must be present. The peer key's curve must match the `kid` key's curve.
 
-### Supported Algorithms (for hashed output)
+### Hash algorithms
 
-SHA2-256, SHA2-384, SHA2-512, SHA3-256, SHA3-384, SHA3-512
+`SHA2-256`, `SHA2-384`, `SHA2-512`, `SHA3-256`, `SHA3-384`, `SHA3-512`. Validated as a ≤8-byte label (`"SHA3-512"` length).
+
+If `alg` is omitted the response contains the bare ECDH output for the underlying curve (32 bytes for X25519/secp256r1/k1, 48 for P-384, 56 for X448, 66 for P-521).
 
 ## Response
 
 **Status:** `200 OK`
 
 ```json
-{
-  "ecdh": "base64_encoded_ecdh_result"
-}
+{ "ecdh": "<base64_shared_secret_or_hash>" }
 ```
 
 ### Error Codes
 
 | Code | Description |
 |------|-------------|
-| 400 | Incorrect argument(s) |
-| 401 | Missing or invalid JWT token |
-| 403 | Incorrect access scope |
-| 406 | Operation failed |
-| 409 | Incorrect internal state |
-| 418 | TLS connection required |
+| 400 | Malformed JSON, missing fields, unknown `alg`, or base64/hex decode failure. |
+| 401 | Missing/invalid Bearer. |
+| 403 | Scope not exact `keymgmt:use:<kid>` or `sub == "M"`. |
+| 406 | ECDH failure (key not ECDH-capable, curve mismatch), hashing failure. |
+| 409 | `fls_state != 0`, software install in progress, or not initialised. |
+| 418 | TLS required. |
+
+Audit log: `LOG_TYPE_CRYPTO_ECDH`.
+
+## Notes
+
+- Returning the raw shared secret means the caller sees the full ECDH output. Prefer `/api/keymgmt/derive` (HKDF + fresh stored key) for operational key exchange; use `/api/crypto/ecdh` only when the caller needs the bytes to feed into a custom KDF or protocol.
 
 ## Encedo Manager Usage
 
-Not registered in the `_endpoints` map and not directly called from the Manager UI. Documented in official docs only.
+Not registered in the Manager's `_endpoints` map and not called from Manager UI.
 
 ## Test Suite Usage
 
 ```php
-// hem-api-tester/test_11.php:571
-$ret_stat = http_transaction("https", "POST", $cfg_domain, "/api/crypto/ecdh", $ret_val, $post_array, $token);
+// test_11.php:571
+http_transaction("https", "POST", $cfg_domain, "/api/crypto/ecdh", $ret_val, $post_array, $token);
 ```
 
-**Source references:** [test_11.php:571](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L571), [test_11.php:579](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L579)
-
-## Official Docs vs Encedo Manager
-
-> **DISCREPANCY:** This endpoint (`/api/crypto/ecdh`) is documented in the official docs but is **not present** in [Encedo Manager](https://github.com/encedo/encedo-manager)'s `_endpoints` registry or `scopes.js`. It is not called anywhere in the Manager JavaScript. The related key derivation is handled via `/api/keymgmt/derive` instead, which has its own `keymgmt:ecdh` scope.
+Test references: [test_11.php:571](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L571), [test_11.php:579](https://github.com/encedo/hem-api-tester/blob/main/test_11.php#L579)
