@@ -4,13 +4,17 @@ Behaviours, endpoints, and mechanics that the [HEM API test suite](https://githu
 
 ---
 
-## 1. KDF choice is client-side — Argon2 in Manager, PBKDF2 in test suite
+## 1. KDF choice is client-side — Manager and test suite agree (PBKDF2)
 
-**[Encedo Manager](https://github.com/encedo/encedo-manager):** Derives the 32-byte authentication secret via **Argon2** (`time=10`, `mem=8192`, `hashLen=32`) with the device `eid` as salt.
+**[Encedo Manager](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L585):** Derives the 32-byte authentication secret with **PBKDF2-HMAC-SHA256** (600 000 iterations, 32 bytes) in `pbkdf2KeyDerive`. The salt is the device `eid` string as returned, encoded as UTF-8. It is used for init, login, `updateCfg` and password change.
 
-**[Test suite](https://github.com/encedo/hem-api-tester/blob/main/libs/lib.php):** Derives the same slot via **PBKDF2-SHA256** (600 000 iterations, 32 bytes) with the same `eid` salt.
+**[Test suite](https://github.com/encedo/hem-api-tester/blob/main/libs/lib.php#L313):** Uses the same parameters and the same salt: `hash_pbkdf2("sha256", $password, $eid, 600000, 32, true)`, with `eid` passed unchanged.
 
-Both feed the derived secret into an identical downstream path — NaCl X25519 keypair → ECDH with device `spk` → HMAC-SHA256 JWT signing. The firmware does not care which KDF was used; it only validates that the resulting shared secret matches the one registered at init time. Practical consequence: an implementation must stick with whichever KDF was used during `/api/auth/init`. Mixing them means authentication fails.
+Both feed the derived secret into an identical downstream path: NaCl X25519 keypair → ECDH with device `spk` → HMAC-SHA256 JWT signing. As a result, the two tools derive the same key from the same password, and there is no KDF mismatch between them. This follows from reading both sources; it has not been tested on a device.
+
+The firmware itself never sees the KDF. It compares the public key in the JWT's `iss` claim with the UserKey/MasterKey registered at init, so any client must reproduce the KDF used during `/api/auth/init`.
+
+Earlier versions of this documentation said the Manager used **Argon2** (`time=10`, `mem=8192`). That was wrong. The claim came from the legacy `assets/encedo.js` (v0.67, 2021) and `assets/core2.js` files that are still in the Manager repository and call `argon2.hash(...)`. The current Manager (`build.js` v0.68) contains no Argon2 code and never runs those files. An older Manager release most likely did use Argon2, though. A device initialised by such a release would hold an Argon2-derived user key and would reject a PBKDF2 login.
 
 **Files:** [auth/token.md](../auth/token.md), [auth/init.md](../auth/init.md)
 

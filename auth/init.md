@@ -180,15 +180,15 @@ Side effects on success:
 
 ## Notes
 
-- The firmware is **KDF-agnostic**: any caller whose public key matches `masterkey` or `userkey` at login time is accepted. The reference implementations (Manager, test suite) use Argon2 and PBKDF2 respectively; see [auth/token.md](token.md).
+- The firmware is **KDF-agnostic**: any caller whose public key matches `masterkey` or `userkey` at login time is accepted. Both reference implementations (Manager, test suite) use the same KDF: PBKDF2-HMAC-SHA256, 600 000 iterations, 32-byte output, salt = the `eid` string as UTF-8 bytes (not base64-decoded). See [auth/token.md](token.md).
 - There is no built-in way to change `masterkey` after init. Rotating it requires a full wipeout + re-init.
 
 ## Encedo Manager Usage
 
 ```javascript
-// build.js:533+
+// build.js:655+ (initFinal)
 app.api('api/auth/init').then(function(challenge) {
-    // 1. Argon2(userPassword, salt=eid) → userkey keypair
+    // 1. PBKDF2-SHA256(userPassword, salt=eid, 600000 iter, 32 bytes) → userkey keypair
     // 2. BIP39 mnemonic → masterSecret → masterkey keypair
     // 3. ECDH(masterSecretKey, spk) → sharedSecret
     // 4. jwt_generate_hs256({ecdh:"x25519"}, { jti, aud, exp, iat, iss, cfg }, sharedSecret)
@@ -196,7 +196,7 @@ app.api('api/auth/init').then(function(challenge) {
 });
 ```
 
-Manager references: [encedo.js:488](https://github.com/encedo/encedo-manager/blob/main/assets/encedo.js#L488), [build.js:533](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L533)
+Manager references: [build.js:655](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L655) (`initFinal`; KDF call at [build.js:678](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L678)), called from [build.js:537](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L537)
 
 ## Test Suite Usage
 

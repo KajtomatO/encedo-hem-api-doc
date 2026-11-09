@@ -149,41 +149,62 @@ Callers should implement sensible retry spacing; retrying immediately on `401` s
 
 ## Authentication Flow — Example Usage
 
-The device itself is agnostic to how the caller materialises the keypair whose public half is stored as `UserKey`/`MasterKey`. In practice there are two reference implementations, each using a different password-based KDF. A device only authenticates callers whose public key matches the one registered during `POST /api/auth/init`, so the KDF must match the one used at init time.
+The device does not care how the caller builds the keypair whose public half is stored as `UserKey`/`MasterKey`. It never sees the KDF. It only compares the public key in the token's `iss` claim with the stored UserKey and MasterKey. A device therefore authenticates only callers whose public key matches the one registered during `POST /api/auth/init`. A client must reproduce whatever KDF was used at init time.
 
-### Example 1: Encedo Manager (Argon2)
+The two reference implementations, Encedo Manager and the HEM API test suite, use the **same** password-based KDF:
+
+- **PBKDF2-HMAC-SHA256**, 600 000 iterations, 32-byte output.
+- **Salt:** the `eid` string exactly as the device returns it, encoded as UTF-8 bytes. It is **not** base64-decoded.
+
+The same password therefore produces the same X25519 keypair in both tools.
+
+### Example 1: Encedo Manager (PBKDF2)
 
 ```javascript
-// encedo-manager: build.js:851-929, encedo.js:447-827
-app.api('api/auth/token').then(function(init) {
-    // 1. Derive 32-byte secret from password using Argon2
-    argon2.hash({ pass: password, salt: FromBase64(init.eid), time: 10, mem: 8192, hashLen: 32 })
-    .then(function(hash) {
-        // 2. Generate X25519 keypair from the derived secret
-        var keys = nacl.box.keyPair.fromSecretKey(hash.hash);
-        // 3. ECDH against the device's session public key
-        var sharedSecret = nacl.scalarMult(keys.secretKey, FromBase64(init.spk));
-        // 4. Sign eJWT with the shared secret
-        var jwt = jwt_generate_hs256(
-            { ecdh: "x25519" },
-            { jti: init.jti, aud: init.spk, exp: init.exp, iat: now, iss: keys.publicKey, scope },
-            sharedSecret);
-        // 5. Submit
-        return app.api('api/auth/token', 'POST', { auth: jwt });
-    })
+// encedo-manager: assets/build.js:585-624 (pbkdf2KeyDerive)
+async pbkdf2KeyDerive(pass_text, seed_text) {
+    const enc = new TextEncoder();
+    const passwordData = enc.encode(pass_text);
+    const saltData = typeof seed_text === "string" ? enc.encode(seed_text) : seed_text;
+    const baseKey = await crypto.subtle.importKey("raw", passwordData, { name: "PBKDF2" }, false, ["deriveBits"]);
+    const derivedBits = await crypto.subtle.deriveBits(
+        { name: "PBKDF2", salt: saltData, iterations: 600000, hash: "SHA-256" },
+        baseKey, 32 * 8);
+    return new Uint8Array(derivedBits);
+}
+
+// encedo-manager: assets/build.js:885-935 (postAuthToken), condensed
+var iat = Math.floor(Date.now() / 1000);
+// 1. Derive 32-byte secret from password, salt = eid string as returned by GET /api/auth/token
+const passhash = await self.pbkdf2KeyDerive(pass, init.eid);
+// 2. Generate X25519 keypair from the derived secret
+var keys = nacl.box.keyPair.fromSecretKey(passhash);
+// 3. ECDH against the device's session public key
+var sharedSecret = nacl.scalarMult(keys.secretKey, new Uint8Array(self.FromBase64(init.spk)));
+// 4. Sign eJWT with the shared secret
+var jwt = await self.jwt_generate_hs256(
+    { ecdh: "x25519" },
+    { jti: init.jti, aud: init.spk, exp: iat + 3600, iat: iat, iss: self.ToBase64(keys.publicKey), scope: scope },
+    sharedSecret);
+// 5. Submit
+self.api('api/auth/token', 'POST', { auth: jwt })
     .then(function(reply) { self.jwt_token = reply.token; });
-});
 ```
 
-Manager references: [encedo.js:447-827](https://github.com/encedo/encedo-manager/blob/main/assets/encedo.js#L447), [build.js:490-929](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L490), [core2.js:4528-4568](https://github.com/encedo/encedo-manager/blob/main/assets/core2.js#L4528)
+Manager references: [build.js:585](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L585) (`pbkdf2KeyDerive`), [build.js:885](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L885) (`postAuthToken`). The same derivation is used for device initialisation (`initFinal`, [build.js:678](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L678)), `updateCfg` ([build.js:1302](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L1302)) and password change ([build.js:7022](https://github.com/encedo/encedo-manager/blob/main/assets/build.js#L7022)).
+
+The Manager repository still ships the legacy files `assets/encedo.js` (v0.67, 2021) and `assets/core2.js`, which call `argon2.hash(...)`. The current Manager never runs that code. Its pages load `build.js`, the repository contains no Argon2 library, no page loads `core2.js`, and the rescue pages that load `encedo.js` never call its init or login functions.
 
 ### Example 2: HEM API test suite (PBKDF2)
 
 ```php
-// hem-api-tester: libs/lib.php — password-to-secret KDF
-$secret = hash_pbkdf2('sha256', $password, base64_decode($eid), 600000, 32, true);
+// hem-api-tester: libs/lib.php:313-314 — password-to-secret KDF
+$salt = $auth_challange['eid'];   // eid string, not base64-decoded
+$user_secret = hash_pbkdf2("sha256", $password, $salt, 600000, 32, true);
 // Then identical X25519 / ECDH / HS256 JWT flow as above.
 ```
+
+This is identical to the Manager's derivation.
 
 The test suite also sets a fuller JWT header:
 ```json
@@ -193,7 +214,7 @@ The device ignores `alg`/`typ` and only branches on the `ecdh` field — both he
 
 Test suite references: [test_3.php:71](https://github.com/encedo/hem-api-tester/blob/main/test_3.php#L71), [test_3.php:97](https://github.com/encedo/hem-api-tester/blob/main/test_3.php#L97), [libs/lib.php:305](https://github.com/encedo/hem-api-tester/blob/main/libs/lib.php#L305), [libs/lib.php:337](https://github.com/encedo/hem-api-tester/blob/main/libs/lib.php#L337)
 
-> **Note:** The two reference implementations cannot interoperate on the same device unless the same KDF was used during `POST /api/auth/init` — the resulting public keys differ. See [DISCREPANCIES-ENCEDO-MANAGER.md](../discrepancies/DISCREPANCIES-ENCEDO-MANAGER.md) and [DISCREPANCIES-HEM-TEST.md](../discrepancies/DISCREPANCIES-HEM-TEST.md).
+> **Note:** Encedo Manager and the test suite derive identical keys from the same password, so either one can log in to a device the other initialised. This follows from reading both sources; it has not been tested on a device. One caveat: older Manager releases (the v0.67-era `encedo.js` code) appear to have used Argon2. A device initialised by such a release would hold an Argon2-derived user key and would reject a PBKDF2 login. See [DISCREPANCIES-ENCEDO-MANAGER.md](../discrepancies/DISCREPANCIES-ENCEDO-MANAGER.md) and [DISCREPANCIES-HEM-TEST.md](../discrepancies/DISCREPANCIES-HEM-TEST.md).
 
 ## Notes
 

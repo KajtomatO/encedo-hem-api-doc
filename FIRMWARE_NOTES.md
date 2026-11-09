@@ -94,7 +94,7 @@ Cross-reference: [keymgmt/derive.md](keymgmt/derive.md).
 
 ## 10. KDF used at init sets the lock-in for life
 
-The firmware is KDF-agnostic at auth-check time — it only sees the 32-byte derived secret. But that secret is set at [`/api/auth/init`](auth/init.md) and cannot be changed without re-initialising. Whichever KDF a client picks (Manager's Argon2, the test suite's PBKDF2, or any other) must be used consistently for every subsequent [`/api/auth/token`](auth/token.md) call. Mixing KDFs silently fails — the JWT HMAC won't match.
+The firmware is KDF-agnostic at auth-check time. It never sees the password or the KDF; it only compares the public key in the JWT's `iss` claim with the UserKey/MasterKey stored at [`/api/auth/init`](auth/init.md). Those keys cannot be changed without re-initialising. Whichever KDF a client picks must therefore be used consistently for every subsequent [`/api/auth/token`](auth/token.md) call. Encedo Manager and the test suite both use PBKDF2-HMAC-SHA256 (600 000 iterations, salt = `eid` string); a custom client may choose another. Mixing KDFs silently fails: a different KDF yields a different keypair, so `iss` matches no stored key.
 
 Cross-reference: [auth/init.md](auth/init.md), [auth/token.md](auth/token.md), [discrepancies/DISCREPANCIES-HEM-TEST.md](discrepancies/DISCREPANCIES-HEM-TEST.md).
 

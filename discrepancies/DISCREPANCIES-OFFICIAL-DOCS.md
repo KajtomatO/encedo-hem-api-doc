@@ -44,7 +44,7 @@ The `auth` / `init` payloads of `/api/auth/token` and `/api/auth/init` are descr
 - Header includes `{"ecdh": "x25519"}`
 - Payload carries `jti`, `aud`, `exp`, `iat`, `iss`, `scope`, `cfg` claims
 
-The 32-byte secret can be derived via any KDF the client picks (Argon2 in Manager, PBKDF2 in the test suite) — the firmware only checks that the resulting key matches the one registered at init.
+The 32-byte secret can be derived via any KDF the client picks (both Manager and the test suite use PBKDF2-HMAC-SHA256, 600 000 iterations, salt = `eid`) — the firmware only checks that the resulting key matches the one registered at init.
 
 **Files:** [auth/token.md](../auth/token.md), [auth/init.md](../auth/init.md)
 
